@@ -1,9 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use codec::{Decode, Encode, MaxEncodedLen};
-use frame_support::{inherent::Vec, parameter_types, sp_runtime::RuntimeDebug, BoundedVec};
-use scale_info::TypeInfo;
-
 pub use pallet::*;
 
 #[cfg(test)]
@@ -15,20 +11,11 @@ mod tests;
 #[cfg(feature = "runtime-benchmarks")]
 mod benchmarking;
 
-/// Lock descriptor
-#[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
-#[scale_info(skip_type_params(T))]
-pub struct Tile <T: Config> {
-    /// Lock's public key
-    id: T::AccountId,
-    /// Lock's owner
-    owner: T::AccountId,
-}
-
 #[frame_support::pallet]
 pub mod pallet {
 	use frame_support::pallet_prelude::*;
 	use frame_system::pallet_prelude::*;
+        use super::*;
 
 	#[pallet::pallet]
 	#[pallet::generate_store(pub(super) trait Store)]
@@ -43,7 +30,7 @@ pub mod pallet {
 	
         #[pallet::storage]
 	#[pallet::getter(fn lock)]
-	pub type LockID<T> = StorageMap<
+	pub type LockId<T: Config> = StorageMap<
             _,
             Blake2_128Concat,
             T::AccountId,
@@ -53,7 +40,7 @@ pub mod pallet {
 
         #[pallet::storage]
 	#[pallet::getter(fn access)]
-	pub type LockAccess<T> = StorageDoubleMap<
+	pub type LockAccess<T: Config> = StorageDoubleMap<
             _,
             Blake2_128Concat,
             T::AccountId,
@@ -61,16 +48,19 @@ pub mod pallet {
             T::AccountId,
             (),
             OptionQuery,
-        >
+        >;
 
 	// Pallets use events to inform users when important changes are made.
 	// https://docs.substrate.io/main-docs/build/events-errors/
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
-		/// Event documentation should end with an array that provides descriptive names for event
-		/// parameters. [something, who]
-		SomethingStored { something: u32, who: T::AccountId },
+                /// New lock registration. [lock public key, controller account id]
+                LockRegistered { lock: T::AccountId, owner: T::AccountId },
+                /// User got access to lock. [lock public key, user account id]
+                AccessGranted { lock: T::AccountId, user: T::AccountId },
+                /// User lost access to lock. [lock public key, user account id]
+                AccessRevoked { lock: T::AccountId, user: T::AccountId },
 	}
 
 	// Errors inform users that something went wrong.
@@ -95,12 +85,14 @@ pub mod pallet {
 	impl<T: Config> Pallet<T> {
 		#[pallet::call_index(0)]
 		#[pallet::weight(10_000 + T::DbWeight::get().writes(1).ref_time())]
-		pub fn new_lock(origin: OriginFor<T>, lockId: T::AccountId) -> DispatchResult {
+		pub fn new_lock(origin: OriginFor<T>, lock_id: T::AccountId) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 
-                        ensure!(!LockId::<T>::contains_key(lockId), Error::<T>::LockExists);
+                        ensure!(!LockId::<T>::contains_key(&lock_id), Error::<T>::LockExists);
 
-			LockId::<T>::insert(lockId, who);
+			LockId::<T>::insert(&lock_id, &who);
+
+                        Self::deposit_event(Event::LockRegistered{ lock: lock_id, owner: who });
 
 			Ok(())
 		}
@@ -108,35 +100,39 @@ pub mod pallet {
 		/// Grant access
 		#[pallet::call_index(1)]
 		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(1,1).ref_time())]
-		pub fn allow_access(origin: OriginFor<T>, lockId: T::AccountId, user: T::AccountId) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+		pub fn grant_access(origin: OriginFor<T>, lock_id: T::AccountId, user: T::AccountId) -> DispatchResult {
+			let who = ensure_signed(origin)?;
 
-                        let owner = lock(lockId);
+                        let owner = Self::lock(&lock_id);
 
-                        if Some(a) = owner {
-                            ensure!(a == who, LockControlDenied);
+                        if let Some(a) = owner {
+                            ensure!(a == who, Error::<T>::LockControlDenied);
                         } else {
-                            return Err(Error::<T>::LockUnknown);
+                            return Err(Error::<T>::LockUnknown.into());
                         }
 
-                        LockAccess<T>::insert(lockId, user, ());
+                        LockAccess::<T>::insert(lock_id, user, ());
+
+                        Ok(())
     		}
 
                 /// Revoke access
 		#[pallet::call_index(2)]
 		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(1,1).ref_time())]
-		pub fn allow_access(origin: OriginFor<T>, lockId: T::AccountId, user: T::AccountId) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+		pub fn revoke_access(origin: OriginFor<T>, lock_id: T::AccountId, user: T::AccountId) -> DispatchResult {
+			let who = ensure_signed(origin)?;
 
-                        let owner = lock(lockId);
+                        let owner = Self::lock(&lock_id);
 
-                        if Some(a) = owner {
-                            ensure!(a == who, LockControlDenied);
+                        if let Some(a) = owner {
+                            ensure!(a == who, Error::<T>::LockControlDenied);
                         } else {
-                            return Err(Error::<T>::LockUnknown);
+                            return Err(Error::<T>::LockUnknown.into());
                         }
 
-                        LockAccess<T>::remove(lockId, user, ());
+                        LockAccess::<T>::remove(lock_id, user);
+
+                        Ok(())
     		}
 
 	}
